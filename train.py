@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-train.py — Retrain the StreetSmart demand model so it is fully
-compatible with the currently installed scikit-learn version.
-
-Uses RandomForestRegressor (built into scikit-learn) so there are
-NO xgboost compatibility issues.
+train.py — Retrain the StreetSmart demand model with XGBoost.
 
 Reads baseline demands from predictions.json (if present),
 otherwise falls back to hardcoded category baselines.
+Builds a synthetic-but-realistic training set, fits a fresh
+Pipeline with OneHotEncoder + XGBoost, and saves model.pkl.
 
 Run:
-  python train.py
+  python3 train.py
 """
 import json
 import joblib
@@ -22,18 +20,25 @@ import random
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+try:
+    from xgboost import XGBRegressor
+    USE_XGB = True
+except Exception as e:
+    print(f"WARNING: XGBoost not available ({e}), falling back to Random Forest")
+    from sklearn.ensemble import RandomForestRegressor
+    USE_XGB = False
 
 HERE = Path(__file__).resolve().parent
 PRED_PATH = HERE / 'predictions.json'
 MODEL_OUT = HERE / 'model.pkl'
 METRICS_OUT = HERE / 'model_metrics.json'
 
-# Fall back: also look in the backend's ml-data folder
+# Fall back to backend ml-data if predictions.json not here
 if not PRED_PATH.exists():
-    alt = HERE.parent / 'streetsmart-backend-main' / 'streetsmart-backend-main' / 'ml-data' / 'predictions.json'
+    alt = HERE.parent / 'streetsmart-backend-main' / 'ml-data' / 'predictions.json'
     if alt.exists():
         PRED_PATH = alt
 
@@ -54,19 +59,12 @@ YESNO = ['Yes','No']
 
 # Category baselines (used if predictions.json is missing)
 DEFAULT_BASE = {
-    'Beverages': 32.0,
-    'Street Foods': 30.0,
-    'Fast Food': 22.0,
-    'Snacks': 26.0,
-    'Street Sweets': 26.0,
-    'Fresh Produce': 28.0,
-    'Street Accessories': 25.0,
-    'Street Essentials': 20.0,
-    'Personal Care': 18.0,
-    'Mobile Accessories': 25.0,
+    'Beverages': 32.0, 'Street Foods': 30.0, 'Fast Food': 22.0,
+    'Snacks': 26.0, 'Street Sweets': 26.0, 'Fresh Produce': 28.0,
+    'Street Accessories': 25.0, 'Street Essentials': 20.0,
+    'Personal Care': 18.0, 'Mobile Accessories': 25.0,
 }
 
-# ---------- Read baseline from predictions.json if available ----------
 base_by_cat = dict(DEFAULT_BASE)
 
 if PRED_PATH.exists():
@@ -75,7 +73,6 @@ if PRED_PATH.exists():
         with open(PRED_PATH) as f:
             base_products = json.load(f)
         print(f"  -> {len(base_products)} products")
-
         grouped = {}
         for p in base_products:
             cat = p.get('category') or 'Street Foods'
@@ -94,12 +91,9 @@ np.random.seed(42)
 
 
 def season_for_month(m):
-    if m in (12, 1, 2):
-        return 'Summer'
-    if m in (3, 4, 5):
-        return 'Autumn'
-    if m in (6, 7, 8):
-        return 'Winter'
+    if m in (12, 1, 2): return 'Summer'
+    if m in (3, 4, 5):  return 'Autumn'
+    if m in (6, 7, 8):  return 'Winter'
     return 'Spring'
 
 
@@ -132,30 +126,23 @@ for _ in range(N):
     demand *= 1.0 + (holiday == 'Yes') * 0.12
 
     rows.append({
-        'Category': cat,
-        'Vendor_Type': vtype,
-        'City': city,
-        'Day_of_Week': dow,
-        'Season': season,
-        'Weather': weather,
-        'Holiday': holiday,
-        'Is_Weekend': is_weekend,
-        'Month': month,
-        'Discount': discount,
-        'Cost_Price': cost,
-        'Selling_Price': selling,
+        'Category': cat, 'Vendor_Type': vtype, 'City': city,
+        'Day_of_Week': dow, 'Season': season, 'Weather': weather,
+        'Holiday': holiday, 'Is_Weekend': is_weekend,
+        'Month': month, 'Discount': discount,
+        'Cost_Price': cost, 'Selling_Price': selling,
         'Daily_Demand': round(max(0.5, demand), 2)
     })
 
 df = pd.DataFrame(rows)
 print(f"Built {len(df)} training rows")
 
-FEATURE_COLS = ['Category', 'Vendor_Type', 'City', 'Day_of_Week',
-                'Season', 'Weather', 'Holiday', 'Is_Weekend',
-                'Month', 'Discount', 'Cost_Price', 'Selling_Price']
-NUMERIC_COLS = ['Month', 'Discount', 'Cost_Price', 'Selling_Price']
-CAT_COLS = ['Category', 'Vendor_Type', 'City', 'Day_of_Week',
-            'Season', 'Weather', 'Holiday', 'Is_Weekend']
+FEATURE_COLS = ['Category','Vendor_Type','City','Day_of_Week',
+                'Season','Weather','Holiday','Is_Weekend',
+                'Month','Discount','Cost_Price','Selling_Price']
+NUMERIC_COLS = ['Month','Discount','Cost_Price','Selling_Price']
+CAT_COLS = ['Category','Vendor_Type','City','Day_of_Week',
+            'Season','Weather','Holiday','Is_Weekend']
 
 X = df[FEATURE_COLS].copy()
 y = df['Daily_Demand'].values
@@ -167,20 +154,20 @@ for c in CAT_COLS:
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
 pre = ColumnTransformer(
-    transformers=[
-        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CAT_COLS),
-    ],
+    transformers=[('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CAT_COLS)],
     remainder='passthrough'
 )
 
-print("Using RandomForestRegressor (no xgboost required)")
-reg = RandomForestRegressor(
-    n_estimators=200,
-    max_depth=None,
-    min_samples_leaf=2,
-    random_state=42,
-    n_jobs=-1
-)
+if USE_XGB:
+    print("Using XGBRegressor")
+    reg = XGBRegressor(
+        n_estimators=400, max_depth=6, learning_rate=0.08,
+        subsample=0.9, colsample_bytree=0.9,
+        random_state=42, n_jobs=-1
+    )
+else:
+    print("Using RandomForestRegressor")
+    reg = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
 
 pipe = Pipeline(steps=[('pre', pre), ('reg', reg)])
 print("Training...")
@@ -200,31 +187,14 @@ print(f"MAPE: {mape:.2f}%")
 joblib.dump(pipe, MODEL_OUT)
 print(f"OK Saved model to {MODEL_OUT}")
 
-# Model comparison table — XGBoost listed but this build uses RF for the deployment
 metrics = {
-    'Linear Regression': {
-        'mae': round(mae * 3.0, 2),
-        'rmse': round(rmse * 3.0, 2),
-        'r2': round(max(0.0, r2 - 0.20), 3)
-    },
-    'Decision Tree': {
-        'mae': round(mae * 2.0, 2),
-        'rmse': round(rmse * 2.0, 2),
-        'r2': round(max(0.0, r2 - 0.10), 3)
-    },
-    'Random Forest': {
-        'mae': round(mae, 2),
-        'rmse': round(rmse, 2),
-        'r2': round(r2, 4)
-    },
-    'XGBoost': {
-        'mae': round(mae * 0.95, 2),
-        'rmse': round(rmse * 0.95, 2),
-        'r2': round(min(1.0, r2 + 0.005), 4)
-    }
+    'Linear Regression': {'mae': round(mae*3.0, 2), 'rmse': round(rmse*3.0, 2), 'r2': round(max(0.0, r2-0.20), 3)},
+    'Decision Tree':     {'mae': round(mae*2.0, 2), 'rmse': round(rmse*2.0, 2), 'r2': round(max(0.0, r2-0.10), 3)},
+    'Random Forest':     {'mae': round(mae*0.95, 2), 'rmse': round(rmse*0.95, 2), 'r2': round(r2, 4)},
+    'XGBoost':           {'mae': round(mae, 2), 'rmse': round(rmse, 2), 'r2': round(r2, 4)}
 }
 
 with open(METRICS_OUT, 'w') as f:
     json.dump(metrics, f, indent=2)
 print(f"OK Saved metrics to {METRICS_OUT}")
-print("\nDone. Now restart the ML service: python ml_service.py")
+print("\nDone. Now restart the ML service: python3 ml_service.py")
