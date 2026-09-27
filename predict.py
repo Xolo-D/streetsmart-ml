@@ -22,7 +22,7 @@ import pandas as pd
 # ---------- Paths ----------
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE / 'model.pkl'
-DB_PATH = HERE.parent.parent / 'streetsmart-backend-main' / 'streetsmart-backend-main' / 'db.sqlite'
+DB_PATH = HERE.parent / 'streetsmart-backend-main' / 'db.sqlite'
 PRED_OUT = HERE / 'predictions.json'
 METRICS_OUT = HERE / 'model_metrics.json'
 
