@@ -1,7 +1,4 @@
-﻿venv/
+﻿.venv/
 __pycache__/
 *.pyc
-predictions.json
-model_metrics.json
-model.pkl
-.DS_Store
+.env
